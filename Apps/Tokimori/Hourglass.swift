@@ -3,7 +3,7 @@ import AppKit
 // 菜单栏沙漏用系统 SF Symbols 的沙漏。苹果允许在 App 界面里使用和调整这些符号，
 // 但不允许用在 App 图标上，所以 App 图标另行设计。
 // 系统沙漏是反白画法：实心部分是空玻璃，挖空的白色才是沙。这里先用两张系统沙漏拼出一个
-// 全实心的外形，再按沙量挖出上腔的沙（沙面是平的）和下腔的沙堆（尖顶，按原版的形状等比放大），
+// 全实心的外形，再按沙量挖出上腔的沙（沙面是平的）和下腔的沙堆（按原版的形状等比放大，顶上平一小段），
 // 中间一道沙流，造型和粗细照系统沙漏
 enum Hourglass {
   // 落完一轮沙的时长，分 12 档。菜单栏每 30 秒刷新一次，换档时最多晚 30 秒
@@ -65,21 +65,20 @@ enum Hourglass {
     return (low + high) / 2
   }
 
-  // 一轮 12 档，每档 2.5 分钟：开头 2 档沙流的头从瓶颈落到一半、落到底，还没有沙堆；
-  // 中间 8 档上腔每档少一截、沙堆每档长一截；结尾 2 档上腔已空，沙流的尾巴收到一半、落进沙堆
+  // 一轮 12 档，每档 2.5 分钟，上腔每档少一截、沙堆每档长一截。第一档就已落下一点、
+  // 最后一档上腔还留一点，每档都有沙流连着上下，看得出在走；漏空的样子只在翻转时出现
   private struct Sand {
-    var step: Int?
+    var running: Bool
     var surface: CGFloat
     var pileScale: CGFloat
 
     init(progress: Double?) {
-      step = progress.map { min(max(Int($0 * Double(steps)), 0), steps - 1) }
-      let fallen: CGFloat
-      switch step {
-      case nil, 0, 1: fallen = 0
-      case let s? where s >= steps - 2: fallen = 1
-      case let s?: fallen = CGFloat(s - 1) / CGFloat(steps - 3)
-      }
+      running = progress != nil
+      let fallen: CGFloat =
+        progress.map {
+          let step = min(max(Int($0 * Double(steps)), 0), steps - 1)
+          return CGFloat(step + 1) / CGFloat(steps + 1)
+        } ?? 0
       surface = level(remaining: 1 - fallen)
       // 沙堆按面积和落下的沙量成正比，边长按平方根放大
       pileScale = fallen.squareRoot()
@@ -91,7 +90,7 @@ enum Hourglass {
     image(pointSize: pointSize, sand: Sand(progress: progress))
   }
 
-  // 漏完后整个沙漏翻过来，degrees 从 0 到 180；转完正好是下一轮开头沙在上腔的样子。
+  // 漏完后整个沙漏翻过来，degrees 从 0 到 180；转完沙全在上腔，接着换成下一轮第一档。
   // 先按屏幕分辨率把正立的沙漏画成位图再整张旋转：直接旋转着画，加宽时拼接的边界会露出细缝
   static func flipping(pointSize: CGFloat, degrees: CGFloat) -> NSImage {
     var done = Sand(progress: nil)
@@ -155,7 +154,7 @@ enum Hourglass {
     else { return NSImage() }
     let native = topSolid.size
 
-    // 沙面、沙堆尖、沙流两端对齐到整行像素，每一档都是干净的一步，不出现半个像素的灰边
+    // 沙面、沙堆顶、沙流两端对齐到整行像素，每一档都是干净的一步，不出现半个像素的灰边
     func snapper(_ context: NSGraphicsContext) -> (CGFloat) -> CGFloat {
       let pixels = abs(context.cgContext.userSpaceToDeviceSpaceTransform.d)
       return { fraction in (native.height * fraction * pixels).rounded() / pixels }
@@ -165,7 +164,7 @@ enum Hourglass {
         ? snap(pileBase + (pileTop - pileBase) * sand.pileScale) / native.height : pileBase
     }
 
-    // 系统沙漏的外形加上沙，不含沙流，按系统符号原本的大小画
+    // 系统沙漏的外形加上上腔的沙，按系统符号原本的大小画
     let body = NSImage(size: native, flipped: false) { rect in
       guard let context = NSGraphicsContext.current else { return false }
       let snap = snapper(context)
@@ -182,10 +181,12 @@ enum Hourglass {
       }
       context.saveGraphicsState()
       context.compositingOperation = .clear
-      // 上腔的沙：腔体形状截到沙面
-      if sand.surface > chamberNeck {
+      // 上腔的沙：腔体形状截到沙面。瓶颈不在整像素上，下沿也截到整像素，
+      // 否则沙快漏完时瓶颈处只剩一道发灰的细线
+      let neck = snap(chamberNeck)
+      if snap(sand.surface) > neck {
         NSGraphicsContext.saveGraphicsState()
-        CGRect(x: 0, y: 0, width: rect.width, height: snap(sand.surface)).clip()
+        CGRect(x: 0, y: neck, width: rect.width, height: snap(sand.surface) - neck).clip()
         let chamber = NSBezierPath()
         chamber.move(to: point(chamberLeft, chamberTop))
         chamber.line(to: point(chamberRight, chamberTop))
@@ -196,17 +197,6 @@ enum Hourglass {
         chamber.close()
         chamber.fill()
         NSGraphicsContext.restoreGraphicsState()
-      }
-      // 下腔的沙堆：原版的三角形，以底边中点为基准按比例缩放
-      if sand.pileScale > 0 {
-        let middle = (pileLeft + pileRight) / 2
-        let half = (pileRight - pileLeft) / 2 * sand.pileScale
-        let pile = NSBezierPath()
-        pile.move(to: point(middle - half, pileBase))
-        pile.line(to: point(middle + half, pileBase))
-        pile.line(to: point(middle, apex(snap)))
-        pile.close()
-        pile.fill()
       }
       context.restoreGraphicsState()
       return true
@@ -233,29 +223,34 @@ enum Hourglass {
         body.draw(in: CGRect(origin: CGPoint(x: shift, y: 0), size: native))
         NSGraphicsContext.restoreGraphicsState()
       }
-      // 沙流：上端伸进上腔的沙，下端伸进沙堆尖一点。尖顶和瓶颈都窄于沙流，
-      // 只接到边上会因为抗锯齿发灰，看着像断了
-      if let step = sand.step {
-        let pileApex = apex(snap)
-        let overlap: CGFloat = 0.03
-        var top = min(sand.surface, chamberNeck + 0.05)
-        var bottom = max(pileApex - overlap, pileBase)
-        switch step {
-        case 0: bottom = (chamberNeck + pileBase) / 2
-        case 1: bottom = pileBase
-        case steps - 2: top = (chamberNeck + pileApex) / 2
-        case steps - 1: top = bottom
-        default: break
-        }
+      context.saveGraphicsState()
+      context.compositingOperation = .clear
+      // 下腔的沙堆：原版的三角形，以底边中点为基准按比例缩放，右半跟着外形挪出加宽量。
+      // 顶上留一段平的，左右边就是沙流的边：尖顶在加宽时会被拉成两个半透明像素，看着像缺了个口
+      if sand.pileScale > 0 {
+        let half = (pileRight - pileLeft) / 2 * sand.pileScale * native.width
+        let base = pileBase * native.height
+        let top = apex(snap) * native.height
+        let pile = NSBezierPath()
+        pile.move(to: CGPoint(x: middle - half, y: base))
+        pile.line(to: CGPoint(x: middle + half + widen, y: base))
+        pile.line(to: CGPoint(x: streamLeft + streamWidth, y: top))
+        pile.line(to: CGPoint(x: streamLeft, y: top))
+        pile.close()
+        pile.fill()
+      }
+      // 沙流：上端伸进上腔的沙，下端伸进沙堆顶一点。瓶颈窄于沙流，只接到边上会因为抗锯齿发灰，
+      // 看着像断了
+      if sand.running {
+        let top = min(sand.surface, chamberNeck + 0.05)
+        let bottom = max(apex(snap) - 0.03, pileBase)
         if top > bottom {
-          context.saveGraphicsState()
-          context.compositingOperation = .clear
           CGRect(
             x: streamLeft, y: snap(bottom), width: streamWidth, height: snap(top) - snap(bottom)
           ).fill()
-          context.restoreGraphicsState()
         }
       }
+      context.restoreGraphicsState()
       return true
     }
     image.isTemplate = true
